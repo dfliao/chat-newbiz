@@ -58,8 +58,10 @@ REDMINE_TRACKER_ID = os.getenv("REDMINE_TRACKER_ID", "").strip()
 REDMINE_STATUS_ID = os.getenv("REDMINE_STATUS_ID", "").strip()
 REDMINE_VERIFY = parse_bool(os.getenv("REDMINE_VERIFY"), default=False)
 
-# 關鍵字
+# 關鍵字（支援多個，用逗號分隔）
 KEYWORD = os.getenv("KEYWORD", "新商機").strip()
+KEYWORDS_RAW = os.getenv("KEYWORDS", "").strip()
+KEYWORDS = [k.strip() for k in KEYWORDS_RAW.split(",") if k.strip()] if KEYWORDS_RAW else [KEYWORD]
 
 
 # ----------------------------
@@ -223,8 +225,8 @@ async def chat_webhook(request: Request):
     if not verify_outgoing_token(channel_id, token_in):
         raise HTTPException(status_code=403, detail="Invalid token for channel")
 
-    # 關鍵字過濾
-    if not text_raw or KEYWORD not in text_raw:
+    # 關鍵字過濾（檢查是否包含任何一個關鍵字）
+    if not text_raw or not any(keyword in text_raw for keyword in KEYWORDS):
         return JSONResponse({"ok": True, "skipped": True, "reason": "keyword not found"})
 
     # 建 Redmine 議題內容

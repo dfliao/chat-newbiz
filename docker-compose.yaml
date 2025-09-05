@@ -2,29 +2,12 @@ version: "3.9"
 
 services:
   chat-newbiz:
-    image: python:3.11-slim
+    build: .
     container_name: chat-newbiz
-    working_dir: /app
     env_file:
       - .env
     volumes:
-      - ./app.py:/app/app.py:ro
-      - ./requirements.txt:/app/requirements.txt:ro
       - ./logs:/app/logs
-    command: >
-      sh -c "
-        python -m pip install --no-cache-dir --upgrade pip &&
-        pip install --no-cache-dir -r requirements.txt &&
-        mkdir -p logs &&
-        touch logs/app.log &&
-        exec uvicorn app:app --host 0.0.0.0 --port ${PORT:-8085} >> logs/app.log 2>&1
-      "
     network_mode: host
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:${PORT:-8085}/health || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
 
