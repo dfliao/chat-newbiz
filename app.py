@@ -290,37 +290,54 @@ def find_redmine_project_id(project_name: str) -> Optional[str]:
     根據專案名稱查找 Redmine 專案ID
     """
     if not REDMINE_URL or not REDMINE_API_KEY or not project_name:
+        logger.warning(f"缺少必要參數: REDMINE_URL={bool(REDMINE_URL)}, API_KEY={bool(REDMINE_API_KEY)}, project_name={project_name}")
         return None
     
     headers = {"X-Redmine-API-Key": REDMINE_API_KEY}
     url = f"{REDMINE_URL}/projects.json"
     
+    logger.info(f"🔍 開始查詢專案: {project_name}")
+    logger.info(f"🌐 API URL: {url}")
+    
     try:
         resp = requests.get(url, headers=headers, timeout=10, verify=REDMINE_VERIFY)
+        logger.info(f"📡 API 回應狀態: {resp.status_code}")
+        
         if resp.status_code == 200:
             data = resp.json()
             projects = data.get("projects", [])
+            logger.info(f"📊 找到 {len(projects)} 個專案")
+            
+            # 列出所有專案（用於調試）
+            for i, project in enumerate(projects[:10]):  # 只列出前10個
+                logger.info(f"  {i+1}. 專案: '{project.get('name')}' (ID: {project.get('id')}, identifier: {project.get('identifier')})")
             
             # 先嘗試精確匹配名稱
+            logger.info(f"🎯 嘗試精確匹配: '{project_name}'")
             for project in projects:
                 if project.get("name") == project_name:
                     project_id = project.get("identifier") or str(project.get("id"))
-                    logger.info(f"找到專案: {project_name} -> ID: {project_id}")
+                    logger.info(f"✅ 找到精確匹配專案: {project_name} -> ID: {project_id}")
                     return project_id
             
             # 再嘗試包含匹配（不區分大小寫）
+            logger.info(f"🔍 嘗試模糊匹配: '{project_name.lower()}'")
             project_name_lower = project_name.lower()
             for project in projects:
-                if project_name_lower in project.get("name", "").lower():
+                project_name_in_db = project.get("name", "").lower()
+                if project_name_lower in project_name_in_db:
                     project_id = project.get("identifier") or str(project.get("id"))
-                    logger.info(f"找到相似專案: {project.get('name')} -> ID: {project_id}")
+                    logger.info(f"✅ 找到相似專案: '{project.get('name')}' -> ID: {project_id}")
                     return project_id
                     
-            logger.warning(f"未找到專案: {project_name}")
+            logger.warning(f"❌ 未找到匹配的專案: {project_name}")
+            return None
+        else:
+            logger.error(f"❌ API 請求失敗: {resp.status_code} - {resp.text[:200]}")
             return None
             
     except Exception as e:
-        logger.error(f"查詢專案時發生錯誤: {e}")
+        logger.error(f"❌ 查詢專案時發生錯誤: {e}")
         return None
 
 
