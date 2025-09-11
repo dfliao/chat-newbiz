@@ -6,7 +6,9 @@
       "Bash(git push:*)",
       "Bash(git remote remove:*)",
       "Bash(git commit:*)",
-      "Bash(git rev-parse:*)"
+      "Bash(git rev-parse:*)",
+      "Bash(python:*)",
+      "Bash(./deploy.sh:*)"
     ],
     "deny": [],
     "ask": []

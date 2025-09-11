@@ -46,6 +46,53 @@ def calculate_business_days(start_date: datetime, days: int) -> str:
     return current.strftime("%Y-%m-%d")
 
 
+def parse_task_params(text: str) -> Optional[Dict[str, str]]:
+    """
+    解析新任務的結構化參數
+    格式：新任務 專案:XXXX 標題:YYYY 指派:ZZZZ 開始:yyyy-mm-dd 完成:yyyy-mm-dd
+    """
+    import re
+    
+    # 檢查是否為新任務格式
+    if not any(keyword in text for keyword in ['新任務', '增加新任務', '增加新議題', '新議題']):
+        return None
+    
+    # 解析參數
+    params = {}
+    param_patterns = {
+        'project': r'專案:\s*([^\s]+)',
+        'subject': r'標題:\s*([^\s]+)',
+        'assignee': r'指派:\s*([^\s]+)', 
+        'start_date': r'開始:\s*(\d{4}-\d{2}-\d{2})',
+        'due_date': r'完成:\s*(\d{4}-\d{2}-\d{2})'
+    }
+    
+    for key, pattern in param_patterns.items():
+        match = re.search(pattern, text)
+        if match:
+            params[key] = match.group(1)
+    
+    # 必填欄位檢查
+    required_fields = ['subject']
+    if not all(field in params for field in required_fields):
+        logger.warning(f"新任務參數不完整，缺少必填欄位: {required_fields}")
+        return None
+        
+    logger.info(f"解析新任務參數: {params}")
+    return params
+
+
+def is_new_business_keyword(text: str) -> bool:
+    """檢查是否為新商機關鍵字（舊功能）"""
+    return any(keyword in text for keyword in KEYWORDS)
+
+
+def is_new_task_keyword(text: str) -> bool:
+    """檢查是否為新任務關鍵字（新功能）"""
+    task_keywords = ['新任務', '增加新任務', '增加新議題', '新議題']
+    return any(keyword in text for keyword in task_keywords)
+
+
 # ----------------------------
 # 環境變數
 # ----------------------------
@@ -355,6 +402,90 @@ def create_business_lead_subtasks(parent_issue_id: int, creation_date: datetime,
     return results
 
 
+def handle_new_task(task_params: Dict[str, str], form: Dict[str, str], channel_id: str) -> JSONResponse:
+    """處理新任務請求"""
+    try:
+        # 從參數中提取資訊
+        subject = task_params.get('subject', '未命名任務')
+        project_name = task_params.get('project', '')  # 可能為空，使用預設專案
+        assignee = task_params.get('assignee', '')
+        start_date = task_params.get('start_date', '')
+        due_date = task_params.get('due_date', '')
+        
+        # 如果沒有指定到期日，使用開始日期+7天（如果有開始日期）
+        if not due_date and start_date:
+            try:
+                start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                due_date = calculate_business_days(start_dt, 7)
+            except ValueError:
+                logger.warning(f"無效的開始日期格式: {start_date}")
+        
+        # 建立議題描述
+        description_lines = [
+            f"**任務類型**: 自訂任務",
+            f"**來源頻道**: {form.get('channel_name','')} (id={channel_id})",
+            f"**建立者**: {form.get('username','')} (id={form.get('user_id','')})",
+        ]
+        
+        if project_name:
+            description_lines.append(f"**指定專案**: {project_name}")
+        if assignee:
+            description_lines.append(f"**指派者**: {assignee}")
+        if start_date:
+            description_lines.append(f"**開始日期**: {start_date}")
+        if due_date:
+            description_lines.append(f"**到期日期**: {due_date}")
+            
+        description_lines.append(f"**完整指令**: {' '.join(f'{k}:{v}' for k, v in task_params.items())}")
+        
+        description = "\n\n".join(description_lines)
+        
+        logger.info(f"🆕 準備建立新任務: {subject[:30]}, assignee={assignee}, due_date={due_date}")
+        
+        # 建立 Redmine 議題
+        r_code, r_body, issue_id = create_redmine_issue(subject, description, assignee, due_date=due_date)
+        
+        # 準備回應訊息
+        if 200 <= r_code < 300 and issue_id:
+            ack_msg = f"✅ 已建立新任務 (ID: {issue_id})\n📝 標題: {subject}"
+            if assignee:
+                ack_msg += f"\n👤 指派: {assignee}"
+            if due_date:
+                ack_msg += f"\n📅 到期: {due_date}"
+            logger.info(f"✅ 新任務建立成功: ID={issue_id}")
+        else:
+            ack_msg = f"❌ 新任務建立失敗 (HTTP {r_code})"
+            logger.error(f"❌ 新任務建立失敗: {r_code} - {r_body[:200]}")
+        
+        # 回貼到頻道
+        incoming_url = get_incoming_webhook_url(channel_id)
+        if incoming_url:
+            send_chat_message(incoming_url, ack_msg)
+        
+        return JSONResponse({
+            "ok": True,
+            "task_type": "new_task",
+            "issue_id": issue_id,
+            "status_code": r_code,
+            "message": ack_msg
+        })
+        
+    except Exception as e:
+        error_msg = f"❌ 處理新任務時發生錯誤: {str(e)}"
+        logger.error(error_msg)
+        
+        # 回貼錯誤訊息
+        incoming_url = get_incoming_webhook_url(channel_id)
+        if incoming_url:
+            send_chat_message(incoming_url, error_msg)
+            
+        return JSONResponse({
+            "ok": False, 
+            "error": str(e),
+            "message": error_msg
+        })
+
+
 # ----------------------------
 # Routes
 # ----------------------------
@@ -466,8 +597,19 @@ async def chat_webhook(request: Request):
     if not verify_outgoing_token(channel_id, token_in):
         raise HTTPException(status_code=403, detail="Invalid token for channel")
 
-    # 關鍵字過濾（檢查是否包含任何一個關鍵字）
-    if not text_raw or not any(keyword in text_raw for keyword in KEYWORDS):
+    # 關鍵字過濾（區分新商機和新任務）
+    if not text_raw:
+        return JSONResponse({"ok": True, "skipped": True, "reason": "empty text"})
+        
+    # 檢查是否為新任務格式
+    task_params = parse_task_params(text_raw)
+    is_new_task = task_params is not None
+    
+    # 檢查是否為新商機格式
+    is_new_business = is_new_business_keyword(text_raw)
+    
+    # 如果兩種格式都不符合，跳過處理
+    if not is_new_task and not is_new_business:
         return JSONResponse({"ok": True, "skipped": True, "reason": "keyword not found"})
 
     # 解析指派者（支援多種格式）
@@ -514,7 +656,16 @@ async def chat_webhook(request: Request):
                 # 不移除這部分文字，因為可能是描述的一部分
                 break
 
-    # 建 Redmine 主議題內容
+    # 根據類型決定處理流程
+    if is_new_task:
+        # 新任務處理流程
+        logger.info(f"🆕 偵測到新任務請求，參數: {task_params}")
+        return handle_new_task(task_params, form, channel_id)
+    else:
+        # 新商機處理流程（保持原有邏輯不變）
+        logger.info(f"💼 偵測到新商機請求")
+
+    # 建 Redmine 主議題內容（新商機用）
     subject = text_for_subject[:120] if text_for_subject else text_raw[:120]
     description_lines = [
         f"**來源頻道**: {form.get('channel_name','')} (id={channel_id})",
