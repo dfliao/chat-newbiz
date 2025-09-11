@@ -285,7 +285,46 @@ def find_redmine_user(assignee_query: str) -> Optional[int]:
     return None
 
 
-def create_redmine_issue(subject: str, description: str, assignee_query: str = None, parent_issue_id: int = None, due_date: str = None) -> Tuple[int, str, Optional[int]]:
+def find_redmine_project_id(project_name: str) -> Optional[str]:
+    """
+    根據專案名稱查找 Redmine 專案ID
+    """
+    if not REDMINE_URL or not REDMINE_API_KEY or not project_name:
+        return None
+    
+    headers = {"X-Redmine-API-Key": REDMINE_API_KEY}
+    url = f"{REDMINE_URL}/projects.json"
+    
+    try:
+        resp = requests.get(url, headers=headers, timeout=10, verify=REDMINE_VERIFY)
+        if resp.status_code == 200:
+            data = resp.json()
+            projects = data.get("projects", [])
+            
+            # 先嘗試精確匹配名稱
+            for project in projects:
+                if project.get("name") == project_name:
+                    project_id = project.get("identifier") or str(project.get("id"))
+                    logger.info(f"找到專案: {project_name} -> ID: {project_id}")
+                    return project_id
+            
+            # 再嘗試包含匹配（不區分大小寫）
+            project_name_lower = project_name.lower()
+            for project in projects:
+                if project_name_lower in project.get("name", "").lower():
+                    project_id = project.get("identifier") or str(project.get("id"))
+                    logger.info(f"找到相似專案: {project.get('name')} -> ID: {project_id}")
+                    return project_id
+                    
+            logger.warning(f"未找到專案: {project_name}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"查詢專案時發生錯誤: {e}")
+        return None
+
+
+def create_redmine_issue(subject: str, description: str, assignee_query: str = None, parent_issue_id: int = None, due_date: str = None, project_name: str = None) -> Tuple[int, str, Optional[int]]:
     if not REDMINE_URL or not REDMINE_API_KEY:
         return 0, "REDMINE_URL or REDMINE_API_KEY not set", None
 
@@ -294,9 +333,23 @@ def create_redmine_issue(subject: str, description: str, assignee_query: str = N
         "description": description or "",
     }
     
-    pid = _project_identifier()
-    if pid:
-        issue["project_id"] = pid
+    # 專案ID決定邏輯：優先使用傳入的專案名稱，然後是環境變數
+    if project_name:
+        # 嘗試通過專案名稱查找專案ID
+        project_id = find_redmine_project_id(project_name)
+        if project_id:
+            issue["project_id"] = project_id
+            logger.info(f"使用指定專案: {project_name} (ID: {project_id})")
+        else:
+            logger.warning(f"找不到專案 '{project_name}'，使用預設專案")
+            pid = _project_identifier()
+            if pid:
+                issue["project_id"] = pid
+    else:
+        # 使用預設專案
+        pid = _project_identifier()
+        if pid:
+            issue["project_id"] = pid
     if REDMINE_TRACKER_ID:
         try:
             issue["tracker_id"] = int(REDMINE_TRACKER_ID)
@@ -440,10 +493,10 @@ def handle_new_task(task_params: Dict[str, str], form: Dict[str, str], channel_i
         
         description = "\n\n".join(description_lines)
         
-        logger.info(f"🆕 準備建立新任務: {subject[:30]}, assignee={assignee}, due_date={due_date}")
+        logger.info(f"🆕 準備建立新任務: {subject[:30]}, project={project_name}, assignee={assignee}, due_date={due_date}")
         
-        # 建立 Redmine 議題
-        r_code, r_body, issue_id = create_redmine_issue(subject, description, assignee, due_date=due_date)
+        # 建立 Redmine 議題（傳入專案名稱）
+        r_code, r_body, issue_id = create_redmine_issue(subject, description, assignee, due_date=due_date, project_name=project_name)
         
         # 準備回應訊息
         if 200 <= r_code < 300 and issue_id:
