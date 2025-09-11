@@ -528,9 +528,9 @@ def handle_new_task(task_params: Dict[str, str], form: Dict[str, str], channel_i
             logger.error(f"❌ 新任務建立失敗: {r_code} - {r_body[:200]}")
         
         # 回貼到頻道
-        incoming_url = get_incoming_webhook_url(channel_id)
-        if incoming_url:
-            send_chat_message(incoming_url, ack_msg)
+        logger.info(f"📤 準備回報到頻道 {channel_id}: {ack_msg[:50]}...")
+        status_code, result = send_chat_message(ack_msg, channel_id)
+        logger.info(f"📨 Chat 訊息發送結果: status={status_code}, result={result}")
         
         return JSONResponse({
             "ok": True,
@@ -544,10 +544,10 @@ def handle_new_task(task_params: Dict[str, str], form: Dict[str, str], channel_i
         error_msg = f"❌ 處理新任務時發生錯誤: {str(e)}"
         logger.error(error_msg)
         
-        # 回貼錯誤訊息
-        incoming_url = get_incoming_webhook_url(channel_id)
-        if incoming_url:
-            send_chat_message(incoming_url, error_msg)
+        # 回貼錯誤訊息  
+        logger.info(f"📤 準備回報錯誤到頻道 {channel_id}: {error_msg[:50]}...")
+        status_code, result = send_chat_message(error_msg, channel_id)
+        logger.info(f"📨 錯誤訊息發送結果: status={status_code}, result={result}")
             
         return JSONResponse({
             "ok": False, 
