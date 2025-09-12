@@ -482,11 +482,27 @@ def handle_new_task(task_params: Dict[str, str], form: Dict[str, str], channel_i
         start_date = task_params.get('start_date', '')
         due_date = task_params.get('due_date', '')
         
-        # 如果沒有指定到期日，使用開始日期+7天（如果有開始日期）
-        if not due_date and start_date:
+        # 日期邏輯處理
+        if start_date and due_date:
+            # 如果兩個日期都有，檢查是否合理
+            try:
+                start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                due_dt = datetime.strptime(due_date, '%Y-%m-%d')
+                
+                # 如果完成日期不在開始日期之後，自動調整為開始日期+1天
+                if due_dt <= start_dt:
+                    logger.warning(f"完成日期 {due_date} 不在開始日期 {start_date} 之後，自動調整")
+                    due_date = (start_dt + timedelta(days=1)).strftime('%Y-%m-%d')
+                    logger.info(f"調整後的完成日期: {due_date}")
+                    
+            except ValueError as e:
+                logger.warning(f"日期格式錯誤: {e}")
+        elif start_date and not due_date:
+            # 只有開始日期，自動設定完成日期為+7工作天
             try:
                 start_dt = datetime.strptime(start_date, '%Y-%m-%d')
                 due_date = calculate_business_days(start_dt, 7)
+                logger.info(f"自動設定完成日期: {due_date}")
             except ValueError:
                 logger.warning(f"無效的開始日期格式: {start_date}")
         
