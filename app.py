@@ -580,6 +580,169 @@ def health():
     return {"status": "ok"}
 
 
+@app.post("/n8n_webhook")
+async def n8n_webhook(request: Request):
+    """
+    n8n 工作流專用端點
+    接受 JSON 格式的任務建立請求
+    
+    請求格式：
+    {
+        "command": "新任務 專案:XXX 標題:YYY 指派:ZZZ 開始:YYYY-MM-DD 完成:YYYY-MM-DD",
+        "channel_id": "196",  // 可選，預設為196
+        "username": "n8n",   // 可選，預設為n8n
+        "user_id": "system"  // 可選，預設為system
+    }
+    """
+    try:
+        # 解析 JSON 請求
+        data = await request.json()
+        command = data.get("command", "")
+        channel_id = str(data.get("channel_id", "196"))
+        username = data.get("username", "n8n")
+        user_id = data.get("user_id", "system")
+        
+        logger.info(f"🔗 n8n webhook 請求: command={command[:50]}, channel={channel_id}")
+        
+        if not command:
+            return JSONResponse({
+                "ok": False,
+                "error": "缺少 command 參數"
+            }, status_code=400)
+        
+        # 構建模擬的 form 資料（模仿 Synology Chat webhook 格式）
+        mock_form = {
+            "channel_id": channel_id,
+            "channel_name": "n8n-workflow",
+            "username": username,
+            "user_id": user_id,
+            "text": command,
+            "token": "n8n-internal"  # 內部呼叫，跳過 token 驗證
+        }
+        
+        # 檢查是否為新任務格式
+        task_params = parse_task_params(command)
+        if task_params:
+            # 處理新任務
+            logger.info(f"🤖 n8n -> 新任務: {task_params}")
+            return await handle_new_task_for_n8n(task_params, mock_form, channel_id)
+        else:
+            # 檢查是否為新商機格式
+            if is_new_business_keyword(command):
+                logger.info(f"🤖 n8n -> 新商機: {command[:50]}")
+                # 這裡可以擴展支援新商機，目前先返回不支援
+                return JSONResponse({
+                    "ok": False,
+                    "error": "n8n 端點目前只支援新任務格式，不支援新商機"
+                }, status_code=400)
+            else:
+                return JSONResponse({
+                    "ok": False,
+                    "error": "無效的指令格式，請使用：新任務 專案:XXX 標題:YYY 指派:ZZZ 開始:YYYY-MM-DD 完成:YYYY-MM-DD"
+                }, status_code=400)
+                
+    except Exception as e:
+        logger.error(f"❌ n8n webhook 處理錯誤: {e}")
+        return JSONResponse({
+            "ok": False,
+            "error": f"處理請求時發生錯誤: {str(e)}"
+        }, status_code=500)
+
+
+async def handle_new_task_for_n8n(task_params: Dict[str, str], form: Dict[str, str], channel_id: str) -> JSONResponse:
+    """專為 n8n 設計的新任務處理函數（不發送 Chat 訊息）"""
+    try:
+        # 從參數中提取資訊
+        subject = task_params.get('subject', '未命名任務')
+        project_name = task_params.get('project', '')
+        assignee = task_params.get('assignee', '')
+        start_date = task_params.get('start_date', '')
+        due_date = task_params.get('due_date', '')
+        
+        # 日期邏輯處理（與原函數相同）
+        if start_date and due_date:
+            try:
+                start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                due_dt = datetime.strptime(due_date, '%Y-%m-%d')
+                
+                if due_dt <= start_dt:
+                    logger.warning(f"完成日期 {due_date} 不在開始日期 {start_date} 之後，自動調整")
+                    due_date = (start_dt + timedelta(days=1)).strftime('%Y-%m-%d')
+                    logger.info(f"調整後的完成日期: {due_date}")
+                    
+            except ValueError as e:
+                logger.warning(f"日期格式錯誤: {e}")
+        elif start_date and not due_date:
+            try:
+                start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                due_date = calculate_business_days(start_dt, 7)
+                logger.info(f"自動設定完成日期: {due_date}")
+            except ValueError:
+                logger.warning(f"無效的開始日期格式: {start_date}")
+        
+        # 建立議題描述
+        description_lines = [
+            f"**任務類型**: n8n 工作流任務",
+            f"**來源**: {form.get('username', 'n8n')} 工作流",
+        ]
+        
+        if project_name:
+            description_lines.append(f"**指定專案**: {project_name}")
+        if assignee:
+            description_lines.append(f"**指派者**: {assignee}")
+        if start_date:
+            description_lines.append(f"**開始日期**: {start_date}")
+        if due_date:
+            description_lines.append(f"**到期日期**: {due_date}")
+            
+        description_lines.append(f"**完整指令**: {' '.join(f'{k}:{v}' for k, v in task_params.items())}")
+        
+        description = "\n\n".join(description_lines)
+        
+        logger.info(f"🤖 準備建立 n8n 任務: {subject[:30]}, project={project_name}, assignee={assignee}, due_date={due_date}")
+        
+        # 建立 Redmine 議題
+        r_code, r_body, issue_id = create_redmine_issue(subject, description, assignee, due_date=due_date, project_name=project_name)
+        
+        # 準備回應（不發送 Chat 訊息，直接返回結果給 n8n）
+        if 200 <= r_code < 300 and issue_id:
+            result_msg = f"已建立新任務 (ID: {issue_id})"
+            logger.info(f"✅ n8n 任務建立成功: ID={issue_id}")
+            
+            return JSONResponse({
+                "ok": True,
+                "task_type": "new_task",
+                "issue_id": issue_id,
+                "subject": subject,
+                "project": project_name,
+                "assignee": assignee,
+                "start_date": start_date,
+                "due_date": due_date,
+                "status_code": r_code,
+                "message": result_msg,
+                "redmine_url": f"{REDMINE_URL}/issues/{issue_id}" if REDMINE_URL else None
+            })
+        else:
+            error_msg = f"任務建立失敗 (HTTP {r_code})"
+            logger.error(f"❌ n8n 任務建立失敗: {r_code} - {r_body[:200]}")
+            
+            return JSONResponse({
+                "ok": False,
+                "error": error_msg,
+                "status_code": r_code,
+                "response": r_body[:200]
+            }, status_code=422)
+        
+    except Exception as e:
+        error_msg = f"處理 n8n 任務時發生錯誤: {str(e)}"
+        logger.error(error_msg)
+        
+        return JSONResponse({
+            "ok": False, 
+            "error": error_msg
+        }, status_code=500)
+
+
 @app.post("/test_webhook")
 async def test_webhook(request: Request):
     """測試端點，用於除錯 webhook 功能"""
